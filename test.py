@@ -52,6 +52,8 @@ def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, en
             order by 1 \
             limit 10000;")
 
+        # if cur.rowcount <= 0:
+        #     continue
         dic = {'date': [], 'availability': []}
         counter = 0
 
@@ -71,10 +73,13 @@ def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, en
             counter = counter + 1
             fileObject.write(str(f'{Queried_At}, {Availability}\n'))
         print('Records Retrieved for departure date: ', departureDate, counter)
+        if counter == 0:
+            fileObject.close()
+            continue
         df = pd.DataFrame.from_dict(dic)
         graphTitle = airlineCode + '-' + flightNumber + ' ' + origin + '-' + destination + ' ' + 'departing on: ' + initRange
         fig = px.line(df, x='date', y="availability", title=graphTitle)
-        fig.write_html(htmlpath, auto_open=True)
+        fig.write_html(htmlpath, auto_open=False)
         # px.write_image(fig, jpegpath, 'jpg')
         
         fileObject.close()
@@ -113,6 +118,7 @@ def buildAging(params):
     except IndexError:
         endRange = initRange
 
+    print(airlineCode, flightNumber, origin, destination, initRange, endRange)
     fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange)
 
 def test(parameters):
