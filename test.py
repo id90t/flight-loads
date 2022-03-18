@@ -1,6 +1,8 @@
 from collections import defaultdict
 from email.policy import default
+import json
 import sys
+from turtle import tracer
 import mysql.connector
 from dotenv import load_dotenv
 import os
@@ -21,15 +23,116 @@ def dbConnect():
         database=os.getenv("MYSQL_DATABASE"))
     return cnx
 
-def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange):
+def buildDictionary(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange):
     cur = cnx.cursor()
-    
+
     dateRange = pd.date_range(initRange, endRange, freq='1D')
+    ddateRange = ''
+    for departureDateO in dateRange:
+        departureDateS = str(departureDateO) 
+        departureDate = departureDateS[:10]
+        ddateRange += "'" + departureDate + "',"
+    sdateRange = ddateRange[:-1]
+
     dirPath = airlineCode + '-' + flightNumber
     try: 
         os.mkdir('./' + dirPath)
     except OSError as error: 
         print('It seems the directory already exists, ignoring...')
+
+    dic = dict(departure_date = [], queried_at = [], availability = [], available_seats = [], total_seats = [], t_minus = [], t_minus_seconds = [])
+
+    sqlQuery = "select departure_date as dep_date, created_at as Queried_At, (available_seats / total_seats) * 100 as Availability, available_seats, total_seats, (-1 * datediff(departure_date, created_at)) as t_minus, timestampdiff(second, departure_date, created_at) as t_minus_seconds\
+            from flight_loads \
+            where airline_code = '" + airlineCode + "'\
+            and flight_number = '" + flightNumber + "' \
+            and departure_airport = '" + origin + "' \
+            and arrival_airport = '" + destination + "' \
+            and total_seats <> 0\
+            and departure_date in(" + sdateRange + ")\
+            and service_class = 'Y'\
+            and created_at <= departure_date\
+            order by created_at asc \
+            limit 10000;"
+    # print(sqlQuery)
+    cur.execute(sqlQuery)
+    # if cur.rowcount <= 0:
+    #     print("No rows were retrieved for the selected period")
+    #     cnx.close()
+    #     exit()
+    fileBaseName = airlineCode + '-' + flightNumber
+
+    htmlpath = dirPath + '/' + fileBaseName + '.html' 
+    jsonpath = dirPath + '/' + fileBaseName + '.json'
+
+    for (dep_date, Queried_At, Availability, available_seats, total_seats, t_minus, t_minus_seconds) in cur:        
+        sdep_date = str(f'{dep_date}')
+        departureDate = sdep_date[:10]
+        qa = str(f'{Queried_At}')
+        dic['departure_date'].append(departureDate)
+        dic['queried_at'].append(qa)
+        dic['availability'].append(Availability)
+        dic['available_seats'].append(available_seats)
+        dic['total_seats'].append(total_seats)
+        dic['t_minus'].append(t_minus)
+        dic['t_minus_seconds'].append(t_minus_seconds)
+
+    print('Records Retrieved for departure date: ', departureDate, cur.rowcount)
+    df = pd.DataFrame.from_dict(dic)
+    graphTitle = airlineCode + '-' + flightNumber + ' ' + origin + '-' + destination
+    df.sort_values(by=['queried_at'], inplace=True)
+    fig = px.line(df, x='queried_at', y="availability", title=graphTitle, color='departure_date', markers=True)
+    fig.write_html(htmlpath, auto_open=False)
+
+    jfile = open(jsonpath, 'w')
+    jfile.write(df.to_json())
+    jfile.close()
+    cnx.close()
+    normalize(df, dateRange)
+
+def writeFile(path, content, modifier):
+    f= open(path, modifier)
+    f.write(content)
+    f.close()
+
+def normalize(df, dateRange):
+    print('kk')
+    dic = dict(departure_date = [], queried_at = [], availability = [], available_seats = [], total_seats = [], t_minus = [], t_minus_seconds = [])
+    zeroDf = pd.DataFrame.from_dict(dic)
+    # for departureDate in dateRange:
+    #     # depMinus10 = pd.to_datetime(departureDate) - pd.to_timedelta(10, unit='d')
+    #     # ddf = df.query("queried_at > '" + str(depMinus10) + "'")
+    #     zeroDf = pd.concat([zeroDf, ddf], ignore_index=True)
+    #     writeFile('./t/filterd'+str(departureDate)+'.json', ddf.to_json(), 'w')
+    # writeFile('./t/filterd_full_df.json', zeroDf.to_json(), 'w')
+    ddf = df.query("t_minus > -11")
+    
+    ddf1 = ddf.sort_values(by=['t_minus_seconds'], ascending=False)
+    fig = px.line(ddf1, x='t_minus_seconds', y="availability", title='t minus in secs', color='departure_date', markers=True)
+    fig.write_html('./t/r.html', auto_open=False)
+    writeFile('./t/r.json', ddf1.to_json(), 'w')
+
+    ddf2 = ddf.sort_values(by=['queried_at'], ascending=False)
+    fig1 = px.line(ddf2, x='queried_at', y="availability", title='created at', color='departure_date', markers=True)
+    fig1.write_html('./t/s.html', auto_open=False)
+    writeFile('./t/s.json', ddf2.to_json(), 'w')
+
+    ddf3 = ddf.sort_values(by=['t_minus'], ascending=False)
+    fig2 = px.line(ddf3, x='t_minus', y="availability", title='t minus in days', color='departure_date', markers=True)
+    fig2.write_html('./t/t.html', auto_open=False)
+    writeFile('./t/t.json', ddf3.to_json(), 'w')
+
+def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange):
+    cur = cnx.cursor()
+    
+    dateRange = pd.date_range(initRange, endRange, freq='1D')
+    
+    dirPath = airlineCode + '-' + flightNumber
+    try: 
+        os.mkdir('./' + dirPath)
+    except OSError as error: 
+        print('It seems the directory already exists, ignoring...')
+
     for departureDateO in dateRange:
         # testDate = pd.to_datetime(departureDate)
         departureDateS = str(departureDateO) 
@@ -40,7 +143,8 @@ def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, en
         # print(str(departureDate.year))
         # print(departureDate, str(departureDate))
         # exit()
-        cur.execute("select created_at as Queried_At, (available_seats / total_seats) * 100 as Availability\
+        # and departure_date = '" + departureDate + "'\
+        cur.execute("select departure_date as dep_date, created_at as Queried_At, (available_seats / total_seats) * 100 as Availability, available_seats, total_seats\
             from flight_loads \
             where airline_code = '" + airlineCode + "'\
             and flight_number = '" + flightNumber + "' \
@@ -49,12 +153,12 @@ def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, en
             and total_seats <> 0\
             and departure_date = '" + departureDate + "'\
             and service_class = 'Y'\
-            order by 1 \
+            order by created_at asc \
             limit 10000;")
 
         # if cur.rowcount <= 0:
         #     continue
-        dic = {'date': [], 'availability': []}
+        
         counter = 0
 
 
@@ -62,29 +166,44 @@ def fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, en
 
         htmlpath = dirPath + '/' + fileBaseName + '.html' 
         csvpath = dirPath + '/' + fileBaseName + '.csv'
-        jpegpath = dirPath + '/' + fileBaseName + '.jpg'
+        jpegpath = dirPath + '/' + fileBaseName + '.json'
         
         
 
         fileObject = open(csvpath, 'w')
-        for (Queried_At, Availability) in cur:
-            dic['date'].append(Queried_At)
+        dic = dict(departure_date = [], queried_at = [], availability = [], available_seats = [], total_seats = [])
+        for (dep_date, Queried_At, Availability, available_seats, total_seats) in cur:
+            id = len(dic['departure_date'])
+            sdep_date = str(f'{dep_date}')
+            departureDate = sdep_date[:10]
+            qa = str(f'{Queried_At}')
+            av = str(f'{round(Availability)}')
+            dic['departure_date'].append(departureDate)
+            dic['queried_at'].append(qa)
             dic['availability'].append(Availability)
+            dic['available_seats'].append(available_seats)
+            dic['total_seats'].append(total_seats)
             counter = counter + 1
+            id = id + 1
             fileObject.write(str(f'{Queried_At}, {Availability}\n'))
         print('Records Retrieved for departure date: ', departureDate, counter)
         if counter == 0:
             fileObject.close()
             continue
+        
         df = pd.DataFrame.from_dict(dic)
-        graphTitle = airlineCode + '-' + flightNumber + ' ' + origin + '-' + destination + ' ' + 'departing on: ' + initRange
-        fig = px.line(df, x='date', y="availability", title=graphTitle)
+        graphTitle = airlineCode + '-' + flightNumber + ' ' + origin + '-' + destination + ' ' + 'departing on: ' + departureDate
+        fig = px.line(df, x='queried_at', y="availability", title=graphTitle)
         fig.write_html(htmlpath, auto_open=False)
         # px.write_image(fig, jpegpath, 'jpg')
+        jfile = open(jpegpath, 'w')
+        jfile.write(df.to_json())
+        jfile.close()
         
         fileObject.close()
 
     cnx.close()
+    # print(df.to_json())
 
 def help():
     print('\
@@ -119,30 +238,74 @@ def buildAging(params):
         endRange = initRange
 
     print(airlineCode, flightNumber, origin, destination, initRange, endRange)
-    fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange)
+    # fetchData(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange)
+    buildDictionary(cnx, airlineCode, flightNumber, origin, destination, initRange, endRange)
 
 def test(parameters):
-    airlineCode, flightNumber, origin, destination, initRange = parameters[2:7]
-    # airlineCode, flightNumber, origin, destination, initRange = chopped
-    try:
-        endRange = parameters[7]
-    except IndexError:
-        endRange = initRange
-     
-    print (airlineCode, flightNumber, origin, destination, initRange, endRange)
+    # dic1 = px.data.gapminder().query("continent == 'Oceania'")
+    # dic1.to_json()
+    dic1 = {
+        "departure_date": {
+            "1": "2022-03-10",
+            "2": "2022-03-10",
+            "3": "2022-03-10",
+            "4": "2022-03-11",
+            "5": "2022-03-11",
+            "6": "2022-03-11"
 
-    # print(str(chopped))
-    # script, method, initRange, endRange = parameters
-    # dateRange = pd.date_range(initRange, endRange, freq='1D')
-    # for idate in dateRange:
-    #     print(idate)
+        },
+		"queried_at": {
+			"1": "2022-03-08",
+			"2": "2022-03-09",
+			"3": "2022-03-10",
+			"4": "2022-03-09",
+			"5": "2022-03-10",
+			"6": "2022-03-11",
+		},
+		"availability": {
+			"1": "60",
+			"2": "50",
+			"3": "40",
+			"4": "30",
+			"5": "20",
+			"6": "10",
+		}
+    }
+    # dic1 = ''
+    # print(dic1.to_json())
+    # exit()
+    # dic1 = {
+    #     '2022-03-10': ['2022-03-08', '2022-03-09', '2022-03-10'], 'availability': ['60', '50', '40'], 
+    #     '2022-03-11': ['2022-03-09', '2022-03-10', '2022-03-11'], 'availability': ['30', '20', '10']
+    # }
+    # dic2 = {'date': ['2022-03-10', '2022-03-11', '2022-03-12'], 'availability': ['30', '20', '10']}
+    # dic = {'a1': dic1, 'a2': dic2}
+
+    df = pd.DataFrame.from_dict(dic1)
+    td = pd.to_timedelta(1,'d')
+    # depMinus10 = pd.to_datetime(departureDate) - pd.to_timedelta(10, unit='d')
+    iniDate = pd.to_datetime('2022-03-09') - td
+    print(iniDate)
+    df.query("queried_at > '" + str(iniDate) + "'", inplace=True)
+    print(df)
+
+    # df.sort_values(by=['queried_at'], inplace=True)
+    # print(df.head(n=3))
+    # exit()
+    # q = df.query("departure_date == '2022-03-12'")
+    # q.sort_values(by=['queried_at'])
+    # print(q.head(n=20))
+    # df.sort_index()
+    
+    # fig = px.line(df, x='queried_at', y="availability", color='departure_date', title="Mati Test", markers=True)
+    # fig.write_html("./test.html", auto_open=False)
 
 def init():
     try:
         method = sys.argv[1]
     except IndexError as error:
         method = ''
-    print(method)
+    # print(method)
     match method:
         case 'checkFlights':
             departureDate = sys.argv[2]
